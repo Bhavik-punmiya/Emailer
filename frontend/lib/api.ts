@@ -72,6 +72,18 @@ export interface CampaignStatus {
   progress: number
 }
 
+export interface EmailSettings {
+  id: string
+  user_id: string
+  email_host: string
+  email_port: number
+  email_user: string
+  email_display_name: string
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
 class ApiService {
   private async request<T>(
     endpoint: string,
@@ -164,6 +176,37 @@ class ApiService {
 
   async getCampaigns(): Promise<{ campaigns: Campaign[] }> {
     return this.request('/api/campaigns')
+  }
+
+  // Email Settings
+  async getEmailSettings(): Promise<EmailSettings> {
+    return this.request('/api/email-settings')
+  }
+
+  async saveEmailSettings(settings: {
+    email_host: string
+    email_port: number
+    email_user: string
+    email_password: string
+    email_display_name: string
+  }): Promise<EmailSettings> {
+    return this.request('/api/email-settings', {
+      method: 'POST',
+      body: JSON.stringify(settings),
+    })
+  }
+
+  async testEmailSettings(settings: {
+    email_host: string
+    email_port: number
+    email_user: string
+    email_password: string
+    email_display_name: string
+  }): Promise<{ message: string }> {
+    return this.request('/api/email-settings/test', {
+      method: 'POST',
+      body: JSON.stringify(settings),
+    })
   }
 }
 
