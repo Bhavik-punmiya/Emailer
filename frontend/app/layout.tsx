@@ -10,7 +10,10 @@ const inter = Inter({ subsets: ["latin"] })
 export const metadata: Metadata = {
   title: "BulkMailer Pro - Bulk Email Sender",
   description: "Professional bulk email sender with template management and personalization",
-    generator: 'v0.dev'
+  generator: 'v0.dev',
+  icons: {
+    icon: '/send-fav-icon.png',
+  },
 }
 
 export default function RootLayout({
