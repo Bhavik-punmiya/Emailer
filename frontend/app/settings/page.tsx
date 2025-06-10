@@ -25,6 +25,7 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false)
   const [testing, setTesting] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
+  const [testingConnection, setTestingConnection] = useState(false)
   
   const [formData, setFormData] = useState({
     email_host: "smtp.gmail.com",
@@ -52,7 +53,9 @@ export default function SettingsPage() {
   const fetchSettings = async () => {
     try {
       setLoading(true)
+      console.log('Fetching email settings...')
       const data = await apiService.getEmailSettings()
+      console.log('Email settings fetched successfully:', data)
       setSettings(data)
       setFormData({
         email_host: data.email_host || "smtp.gmail.com",
@@ -62,12 +65,16 @@ export default function SettingsPage() {
         email_display_name: data.email_display_name || "Bulk Email Sender"
       })
     } catch (error: any) {
+      console.error("Error fetching settings:", error)
       if (error.message.includes('404') || error.message.includes('No email settings found')) {
         // No settings found, use defaults
+        console.log('No email settings found, using defaults')
         setSettings(null)
+      } else if (error.message.includes('401') || error.message.includes('Invalid authentication')) {
+        toast.error("Please log in to access email settings")
+        router.push('/login')
       } else {
-        console.error("Error fetching settings:", error)
-        toast.error("Failed to fetch settings")
+        toast.error(`Failed to fetch settings: ${error.message}`)
       }
     } finally {
       setLoading(false)
@@ -108,13 +115,20 @@ export default function SettingsPage() {
 
     try {
       setSaving(true)
+      console.log('Saving email settings...', formData)
       const data = await apiService.saveEmailSettings(formData)
+      console.log('Email settings saved successfully:', data)
       setSettings(data)
       toast.success("Email settings saved successfully!")
       await fetchSettings() // Refresh the settings
     } catch (error: any) {
       console.error("Error saving settings:", error)
-      toast.error(error.message || "Failed to save settings")
+      if (error.message.includes('401') || error.message.includes('Invalid authentication')) {
+        toast.error("Please log in to save email settings")
+        router.push('/login')
+      } else {
+        toast.error(`Failed to save settings: ${error.message}`)
+      }
     } finally {
       setSaving(false)
     }
@@ -125,13 +139,35 @@ export default function SettingsPage() {
 
     try {
       setTesting(true)
+      console.log('Testing email settings...', formData)
       await apiService.testEmailSettings(formData)
+      console.log('Email settings test successful')
       toast.success("Test email sent successfully! Check your inbox.")
     } catch (error: any) {
       console.error("Error testing settings:", error)
-      toast.error(error.message || "Test failed")
+      if (error.message.includes('401') || error.message.includes('Invalid authentication')) {
+        toast.error("Please log in to test email settings")
+        router.push('/login')
+      } else {
+        toast.error(`Test failed: ${error.message}`)
+      }
     } finally {
       setTesting(false)
+    }
+  }
+
+  const handleTestConnection = async () => {
+    try {
+      setTestingConnection(true)
+      console.log('Testing API connection...')
+      const result = await apiService.testAuth()
+      console.log('API connection test successful:', result)
+      toast.success("API connection successful!")
+    } catch (error: any) {
+      console.error("API connection test failed:", error)
+      toast.error(`API connection failed: ${error.message}`)
+    } finally {
+      setTestingConnection(false)
     }
   }
 
@@ -364,6 +400,55 @@ export default function SettingsPage() {
                   </CardContent>
                 </Card>
               )}
+
+              {/* Debug Section */}
+              <Card>
+                <CardHeader>
+                  <CardTitle>Debug Information</CardTitle>
+                  <CardDescription>
+                    Technical information to help troubleshoot API issues
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-4">
+                    <div className="space-y-2 text-sm">
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">API Base URL:</span>
+                        <span className="font-mono">{process.env.NEXT_PUBLIC_API_URL || 'Not set'}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">User Authenticated:</span>
+                        <span className={user ? "text-green-600" : "text-red-600"}>
+                          {user ? "Yes" : "No"}
+                        </span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">User ID:</span>
+                        <span className="font-mono">{user?.id || "Not available"}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-muted-foreground">Settings Status:</span>
+                        <span className={settings ? "text-green-600" : "text-yellow-600"}>
+                          {settings ? "Configured" : "Not configured"}
+                        </span>
+                      </div>
+                    </div>
+                    
+                    <div className="pt-2">
+                      <Button
+                        onClick={handleTestConnection}
+                        disabled={testingConnection}
+                        variant="outline"
+                        size="sm"
+                        className="w-full"
+                      >
+                        {testingConnection && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                        Test API Connection
+                      </Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
             </div>
           </div>
         </SidebarInset>

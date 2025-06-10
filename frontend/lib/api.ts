@@ -111,17 +111,30 @@ class ApiService {
             ...config.headers,
             'Authorization': `Bearer ${session.access_token}`,
           }
+        } else {
+          console.warn('No session found - user might not be authenticated')
         }
       } catch (e) {
         console.warn('Failed to get auth token:', e)
       }
     }
 
+    console.log(`Making request to: ${url}`)
+    console.log('Request config:', config)
+
     const response = await fetch(url, config)
     
+    console.log(`Response status: ${response.status}`)
+    
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }))
-      throw new Error(errorData.detail || `HTTP error! status: ${response.status}`)
+      let errorMessage = `HTTP error! status: ${response.status}`
+      try {
+        const errorData = await response.json()
+        errorMessage = errorData.error || errorData.detail || errorMessage
+      } catch (e) {
+        console.warn('Could not parse error response:', e)
+      }
+      throw new Error(errorMessage)
     }
 
     return response.json()
@@ -178,9 +191,27 @@ class ApiService {
     return this.request('/api/campaigns')
   }
 
-  // Email Settings
+  // Email Settings - Try multiple path patterns for Google Cloud Functions
   async getEmailSettings(): Promise<EmailSettings> {
-    return this.request('/api/email-settings')
+    const paths = [
+      '/api/email-settings',
+      '/email-settings',
+      '/api/email-settings/',
+      '/email-settings/'
+    ]
+    
+    for (const path of paths) {
+      try {
+        console.log(`Trying path: ${path}`)
+        return await this.request(path)
+      } catch (error: any) {
+        console.log(`Failed with path ${path}:`, error.message)
+        if (path === paths[paths.length - 1]) {
+          throw error // Re-throw the last error if all paths fail
+        }
+      }
+    }
+    throw new Error('All API paths failed')
   }
 
   async saveEmailSettings(settings: {
@@ -190,10 +221,28 @@ class ApiService {
     email_password: string
     email_display_name: string
   }): Promise<EmailSettings> {
-    return this.request('/api/email-settings', {
-      method: 'POST',
-      body: JSON.stringify(settings),
-    })
+    const paths = [
+      '/api/email-settings',
+      '/email-settings',
+      '/api/email-settings/',
+      '/email-settings/'
+    ]
+    
+    for (const path of paths) {
+      try {
+        console.log(`Trying path: ${path}`)
+        return await this.request(path, {
+          method: 'POST',
+          body: JSON.stringify(settings),
+        })
+      } catch (error: any) {
+        console.log(`Failed with path ${path}:`, error.message)
+        if (path === paths[paths.length - 1]) {
+          throw error // Re-throw the last error if all paths fail
+        }
+      }
+    }
+    throw new Error('All API paths failed')
   }
 
   async testEmailSettings(settings: {
@@ -203,10 +252,28 @@ class ApiService {
     email_password: string
     email_display_name: string
   }): Promise<{ message: string }> {
-    return this.request('/api/email-settings/test', {
-      method: 'POST',
-      body: JSON.stringify(settings),
-    })
+    const paths = [
+      '/api/email-settings/test',
+      '/email-settings/test',
+      '/api/email-settings/test/',
+      '/email-settings/test/'
+    ]
+    
+    for (const path of paths) {
+      try {
+        console.log(`Trying path: ${path}`)
+        return await this.request(path, {
+          method: 'POST',
+          body: JSON.stringify(settings),
+        })
+      } catch (error: any) {
+        console.log(`Failed with path ${path}:`, error.message)
+        if (path === paths[paths.length - 1]) {
+          throw error // Re-throw the last error if all paths fail
+        }
+      }
+    }
+    throw new Error('All API paths failed')
   }
 }
 
