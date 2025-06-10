@@ -1,0 +1,11 @@
+functions-framework==3.4.0
+flask==2.3.3
+flask-cors==4.0.0
+pydantic==2.5.0
+pydantic[email]==2.5.0
+pydantic-extra-types[email]==2.1.0
+python-dotenv==1.0.0
+supabase==2.0.2
+markdown==3.5.1
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4 
