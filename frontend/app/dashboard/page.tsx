@@ -13,7 +13,8 @@ import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Progress } from "@/components/ui/progress"
 import { apiService, DashboardStats, Campaign } from "@/lib/api"
-import { Mail, Users, FileText, Clock, CheckCircle, XCircle, AlertCircle } from "lucide-react"
+import { Mail, Users, FileText, Clock, CheckCircle, XCircle, AlertCircle, Settings } from "lucide-react"
+import { Alert, AlertDescription } from "@/components/ui/alert"
 
 export default function Dashboard() {
   const [stats, setStats] = useState<DashboardStats | null>(null)
@@ -121,6 +122,27 @@ export default function Dashboard() {
                   Overview of your email campaigns and performance
                 </p>
               </div>
+
+              {/* Email Settings Warning */}
+              {!loading && stats && !stats.has_email_settings && (
+                <Alert>
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>
+                    <div className="flex items-center justify-between">
+                      <span>Please configure your email settings before sending emails.</span>
+                      <Button 
+                        variant="outline" 
+                        size="sm" 
+                        onClick={() => router.push('/settings')}
+                        className="ml-4"
+                      >
+                        <Settings className="h-4 w-4 mr-2" />
+                        Configure Settings
+                      </Button>
+                    </div>
+                  </AlertDescription>
+                </Alert>
+              )}
 
               {/* Stats Cards */}
               {loading ? (

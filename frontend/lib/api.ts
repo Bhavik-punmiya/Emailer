@@ -38,6 +38,7 @@ export interface DashboardStats {
   total_emails_failed: number
   recent_campaigns: any[]
   templates_count: number
+  has_email_settings: boolean
 }
 
 export interface Campaign {
