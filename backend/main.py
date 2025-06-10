@@ -1,8 +1,3 @@
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, EmailStr
-from typing import List, Optional, Dict, Any
 import smtplib
 import ssl
 from email.mime.text import MIMEText
@@ -10,540 +5,368 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
 import os
-import csv
-import io
-import json
 import base64
 from datetime import datetime
-import asyncio
-from supabase import create_client, Client
-import markdown
 import logging
 from dotenv import load_dotenv
-
-# Import campaign tracker
+import functions_framework
+from supabase import create_client, Client
+import markdown
+import json
 from campaign_tracker import campaign_tracker
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Bulk Email Sender API", version="1.0.0")
+load_dotenv()
 
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Security
-security = HTTPBearer()
-
-load_dotenv() 
 # Supabase configuration
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-
 if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
     raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set")
-
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
-# Email configuration
-EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.gmail.com")
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
-EMAIL_USER = os.getenv("EMAIL_USER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-EMAIL_DISPLAY_NAME = os.getenv("EMAIL_DISPLAY_NAME", "Bulk Email Sender")
+# Default email configuration (fallback)
+DEFAULT_EMAIL_HOST = "smtp.gmail.com"
+DEFAULT_EMAIL_PORT = 587
+DEFAULT_EMAIL_DISPLAY_NAME = "Bulk Email Sender"
 
-# Pydantic models
-class Contact(BaseModel):
-    name: str
-    email: EmailStr
-    company: Optional[str] = None
-    job_title: Optional[str] = None
-
-class EmailTemplate(BaseModel):
-    name: str
-    subject: str
-    body: str
-
-class FileAttachment(BaseModel):
-    filename: str
-    content: str  # base64 encoded content
-    content_type: str
-
-class SendEmailRequest(BaseModel):
-    contacts: List[Contact]
-    template: EmailTemplate
-    user_id: str
-    attachments: Optional[List[FileAttachment]] = []
-
-class CampaignStatus(BaseModel):
-    campaign_id: str
-    status: str
-    sent: int
-    failed: int
-    total: int
-    progress: float
-
-class SavedTemplate(BaseModel):
-    id: Optional[str] = None
-    user_id: str
-    name: str
-    subject: str
-    body: str
-    attachments: Optional[List[FileAttachment]] = []
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
-
-class DashboardStats(BaseModel):
-    total_campaigns: int
-    total_emails_sent: int
-    total_emails_failed: int
-    recent_campaigns: List[Dict[str, Any]]
-    templates_count: int
-
-# Authentication dependency
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+# Authentication function
+def get_current_user(request):
     try:
-        # Get the JWT token from the Authorization header
-        token = credentials.credentials
-        logger.info(f"Received token: {token[:20]}...")  # Log first 20 chars for debugging
-        
-        # Verify the JWT token with Supabase
-        # Use the admin client to verify the token
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            raise Exception("No valid authorization header")
+        token = auth_header.split(' ')[1]
         user_response = supabase.auth.get_user(token)
-        
         if not user_response.user:
-            logger.error("No user found in token response")
-            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
-            
-        logger.info(f"Authenticated user: {user_response.user.id}")
+            raise Exception("Invalid authentication credentials")
         return user_response.user
     except Exception as e:
         logger.error(f"Authentication error: {e}")
-        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+        return None
 
-# Email sending function
-def send_single_email(contact: Contact, template: EmailTemplate, smtp_server: smtplib.SMTP, attachments: List[FileAttachment] = []):
+# Function to get user's email settings
+def get_user_email_settings(user_id):
     try:
-        # Create message
+        response = supabase.table("email_settings").select("*").eq("user_id", user_id).eq("is_active", True).execute()
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+        return None
+    except Exception as e:
+        logger.error(f"Error fetching user email settings: {e}")
+        return None
+
+# Email sending function with user-specific settings
+def send_single_email(contact, template, smtp_server, user_settings, attachments=[]):
+    try:
         msg = MIMEMultipart("alternative")
-        msg["Subject"] = template.subject
-        msg["From"] = f"{EMAIL_DISPLAY_NAME} <{EMAIL_USER}>"
-        msg["To"] = contact.email
-
-        # Personalize content
-        personalized_body = template.body.replace("{name}", contact.name)
-        personalized_body = personalized_body.replace("{email}", contact.email)
-        if contact.company:
-            personalized_body = personalized_body.replace("{company}", contact.company)
-        if contact.job_title:
-            personalized_body = personalized_body.replace("{jobTitle}", contact.job_title)
-
-        # Create text and HTML versions
+        msg["Subject"] = template["subject"]
+        msg["From"] = f"{user_settings['email_display_name']} <{user_settings['email_user']}>"
+        msg["To"] = contact["email"]
+        personalized_body = template["body"].replace("{name}", contact["name"])
+        personalized_body = personalized_body.replace("{email}", contact["email"])
+        if contact.get("company"):
+            personalized_body = personalized_body.replace("{company}", contact["company"])
+        if contact.get("job_title"):
+            personalized_body = personalized_body.replace("{jobTitle}", contact["job_title"])
         text = personalized_body
-        
-        # Convert markdown to HTML, but preserve existing HTML
         if personalized_body.startswith("<") and personalized_body.endswith(">"):
-            # Already HTML, use as is
             html = personalized_body
         else:
-            # Convert markdown to HTML
             html = markdown.markdown(personalized_body, extensions=['extra'])
-
         part1 = MIMEText(text, "plain")
         part2 = MIMEText(html, "html")
-
         msg.attach(part1)
         msg.attach(part2)
-
-        # Add attachments
         for attachment in attachments:
             try:
-                # Decode base64 content
-                file_content = base64.b64decode(attachment.content)
-                
-                # Create attachment
+                file_content = base64.b64decode(attachment["content"])
                 part = MIMEBase('application', 'octet-stream')
                 part.set_payload(file_content)
                 encoders.encode_base64(part)
-                part.add_header(
-                    'Content-Disposition',
-                    f'attachment; filename= {attachment.filename}'
-                )
+                part.add_header('Content-Disposition', f'attachment; filename= {attachment["filename"]}')
                 msg.attach(part)
             except Exception as e:
-                logger.error(f"Failed to attach file {attachment.filename}: {e}")
-
-        # Send email
-        smtp_server.sendmail(EMAIL_USER, contact.email, msg.as_string())
+                logger.error(f"Failed to attach file {attachment['filename']}: {e}")
+        smtp_server.sendmail(user_settings['email_user'], contact["email"], msg.as_string())
         return True
     except Exception as e:
-        logger.error(f"Failed to send email to {contact.email}: {e}")
+        logger.error(f"Failed to send email to {contact['email']}: {e}")
         return False
 
-# Background task for sending emails
-async def send_bulk_emails_task(campaign_id: str, contacts: List[Contact], template: EmailTemplate, user_id: str, attachments: List[FileAttachment] = []):
+def send_bulk_emails_task(campaign_id, contacts, template, user_id, attachments=[]):
     try:
         logger.info(f"Starting email campaign {campaign_id} for {len(contacts)} contacts")
         
-        # Check if this is a temporary campaign
-        is_temp_campaign = campaign_id.startswith("temp_")
+        # Get user's email settings
+        user_settings = get_user_email_settings(user_id)
+        if not user_settings:
+            logger.error(f"No email settings found for user {user_id}")
+            if campaign_id.startswith("temp_"):
+                campaign_tracker.update_temp_campaign(campaign_id, status="failed", progress=0.0)
+            return
         
+        is_temp_campaign = campaign_id.startswith("temp_")
         if is_temp_campaign:
-            # Update temporary campaign status
             campaign_tracker.update_temp_campaign(campaign_id, status="running", progress=0.0)
-        else:
-            # Try to update campaign status to running in database
-            try:
-                supabase.table("email_campaigns").update({
-                    "status": "running",
-                    "progress": 0.0
-                }).eq("id", campaign_id).execute()
-            except:
-                logger.warning("Could not update campaign status in database, continuing with email sending")
-
-        # Setup SMTP connection
+        
         context = ssl.create_default_context()
-        with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT) as server:
+        with smtplib.SMTP(user_settings['email_host'], user_settings['email_port']) as server:
             server.starttls(context=context)
-            server.login(EMAIL_USER, EMAIL_PASSWORD)
-            logger.info("SMTP connection established")
-
-            total = len(contacts)
-            sent = 0
-            failed = 0
-
+            server.login(user_settings['email_user'], user_settings['email_password'])
+            sent_count = 0
+            failed_count = 0
             for i, contact in enumerate(contacts):
                 try:
-                    success = send_single_email(contact, template, server, attachments)
+                    success = send_single_email(contact, template, server, user_settings, attachments)
                     if success:
-                        sent += 1
-                        logger.info(f"Email sent successfully to {contact.email}")
+                        sent_count += 1
                     else:
-                        failed += 1
-                        logger.error(f"Failed to send email to {contact.email}")
+                        failed_count += 1
+                    progress = (i + 1) / len(contacts) * 100
+                    if is_temp_campaign:
+                        campaign_tracker.update_temp_campaign(
+                            campaign_id, status="running", progress=progress, sent=sent_count, failed=failed_count
+                        )
                 except Exception as e:
-                    failed += 1
-                    logger.error(f"Error sending to {contact.email}: {e}")
-
-                # Update progress
-                progress = ((i + 1) / total) * 100
-                
-                if is_temp_campaign:
-                    # Update temporary campaign progress
-                    campaign_tracker.update_temp_campaign(
-                        campaign_id, 
-                        sent=sent, 
-                        failed=failed, 
-                        progress=progress
-                    )
-                else:
-                    # Try to update database progress
-                    try:
-                        supabase.table("email_campaigns").update({
-                            "sent_count": sent,
-                            "failed_count": failed,
-                            "progress": progress
-                        }).eq("id", campaign_id).execute()
-                    except:
-                        pass  # Continue even if progress update fails
-
-                # Small delay to avoid rate limiting
-                await asyncio.sleep(0.1)
-
-            # Update final status
+                    logger.error(f"Error sending to {contact['email']}: {e}")
+                    failed_count += 1
+            final_status = "completed" if failed_count == 0 else "completed_with_errors"
             if is_temp_campaign:
-                # Complete temporary campaign
-                campaign_tracker.complete_temp_campaign(campaign_id, sent, failed)
-            else:
-                # Try to update database final status
-                try:
-                    supabase.table("email_campaigns").update({
-                        "status": "completed",
-                        "sent_count": sent,
-                        "failed_count": failed,
-                        "progress": 100.0
-                    }).eq("id", campaign_id).execute()
-                except:
-                    logger.warning("Could not update final campaign status in database")
-
-            logger.info(f"Campaign {campaign_id} completed: {sent} sent, {failed} failed")
-
+                campaign_tracker.update_temp_campaign(
+                    campaign_id, status=final_status, progress=100.0, sent=sent_count, failed=failed_count
+                )
+            logger.info(f"Campaign {campaign_id} completed: {sent_count} sent, {failed_count} failed")
     except Exception as e:
         logger.error(f"Campaign {campaign_id} failed: {e}")
-        
         if campaign_id.startswith("temp_"):
-            # Update temporary campaign as failed
-            campaign_tracker.update_temp_campaign(campaign_id, status="failed")
-        else:
-            # Try to update database status to failed
+            campaign_tracker.update_temp_campaign(campaign_id, status="failed", progress=0.0)
+
+@functions_framework.http
+def email_api(request):
+    # Set CORS headers for the preflight request
+    if request.method == 'OPTIONS':
+        headers = {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+            'Access-Control-Max-Age': '3600'
+        }
+        return ('', 204, headers)
+    headers = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+    }
+    try:
+        path = request.path
+        method = request.method
+        if path == "/" and method == "GET":
+            return json.dumps({"message": "Bulk Email Sender API", "version": "1.0.0"}), 200, headers
+        elif path == "/api/test-auth" and method == "GET":
+            user = get_current_user(request)
+            if not user:
+                return json.dumps({"error": "Invalid authentication"}), 401, headers
+            return json.dumps({"message": "Authentication successful", "user_id": user.id}), 200, headers
+        elif path == "/api/email-settings" and method == "GET":
+            user = get_current_user(request)
+            if not user:
+                return json.dumps({"error": "Invalid authentication"}), 401, headers
             try:
-                supabase.table("email_campaigns").update({
-                    "status": "failed",
-                    "error_message": str(e)
-                }).eq("id", campaign_id).execute()
-            except:
-                logger.warning("Could not update campaign error status in database")
-
-# API Routes
-@app.get("/")
-async def root():
-    return {"message": "Bulk Email Sender API", "version": "1.0.0"}
-
-@app.get("/api/test-auth")
-async def test_auth(current_user = Depends(get_current_user)):
-    return {"message": "Authentication successful", "user_id": current_user.id}
-
-@app.post("/api/send-emails")
-async def send_emails(
-    request: SendEmailRequest,
-    background_tasks: BackgroundTasks,
-    current_user = Depends(get_current_user)
-):
-    try:
-        # Validate user
-        if current_user.id != request.user_id:
-            raise HTTPException(status_code=403, detail="Unauthorized")
-
-        # Create campaign record with all required fields
-        campaign_data = {
-            "user_id": request.user_id,
-            "name": f"Campaign {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}",
-            "subject": request.template.subject,
-            "body": request.template.body,
-            "status": "pending",
-            "total_emails": len(request.contacts),
-            "sent_count": 0,
-            "failed_count": 0,
-            "progress": 0.0
-        }
-
-        try:
-            # Insert campaign record
-            campaign_response = supabase.table("email_campaigns").insert(campaign_data).execute()
-            campaign_id = campaign_response.data[0]["id"]
-            logger.info(f"Campaign created with ID: {campaign_id}")
-        except Exception as db_error:
-            logger.error(f"Database error creating campaign: {db_error}")
-            # If database fails, still proceed with email sending using temporary ID
-            campaign_id = f"temp_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
-            logger.info(f"Using temporary campaign ID: {campaign_id}")
-            # Create temporary campaign tracking
-            campaign_tracker.create_temp_campaign(campaign_id, len(request.contacts))
-
-        # Start background task for email sending
-        background_tasks.add_task(
-            send_bulk_emails_task,
-            campaign_id,
-            request.contacts,
-            request.template,
-            request.user_id,
-            request.attachments
-        )
-
-        return {
-            "campaign_id": campaign_id,
-            "status": "pending",
-            "message": f"Email campaign started - sending to {len(request.contacts)} recipients"
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error starting email campaign: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/campaigns/{campaign_id}/status")
-async def get_campaign_status(campaign_id: str, current_user = Depends(get_current_user)):
-    try:
-        # Check if this is a temporary campaign ID
-        if campaign_id.startswith("temp_"):
-            # Get status from campaign tracker
-            temp_status = campaign_tracker.get_temp_campaign_status(campaign_id)
-            if temp_status:
-                return CampaignStatus(
-                    campaign_id=campaign_id,
-                    status=temp_status["status"],
-                    sent=temp_status["sent"],
-                    failed=temp_status["failed"],
-                    total=temp_status["total"],
-                    progress=temp_status["progress"]
-                )
-            else:
-                # Fallback for unknown temporary campaigns
-                return CampaignStatus(
-                    campaign_id=campaign_id,
-                    status="completed",  # Assume completed since emails are sending
-                    sent=4,  # Based on your logs showing 4 emails sent
-                    failed=0,
-                    total=4,
-                    progress=100.0
-                )
-        
-        # Try to get campaign from database for real UUID campaigns
-        try:
-            response = supabase.table("email_campaigns").select("*").eq("id", campaign_id).eq("user_id", current_user.id).execute()
+                settings = get_user_email_settings(user.id)
+                if settings:
+                    # Don't return the password in the response
+                    safe_settings = {k: v for k, v in settings.items() if k != 'email_password'}
+                    return json.dumps(safe_settings), 200, headers
+                else:
+                    return json.dumps({"error": "No email settings found"}), 404, headers
+            except Exception as e:
+                logger.error(f"Error fetching email settings: {e}")
+                return json.dumps({"error": "Failed to fetch email settings"}), 500, headers
+        elif path == "/api/email-settings" and method == "POST":
+            user = get_current_user(request)
+            if not user:
+                return json.dumps({"error": "Invalid authentication"}), 401, headers
+            data = request.get_json()
+            if not data:
+                return json.dumps({"error": "No data provided"}), 400, headers
+            try:
+                # Check if user already has settings
+                existing_settings = get_user_email_settings(user.id)
+                
+                settings_data = {
+                    "user_id": user.id,
+                    "email_host": data.get("email_host", DEFAULT_EMAIL_HOST),
+                    "email_port": int(data.get("email_port", DEFAULT_EMAIL_PORT)),
+                    "email_user": data.get("email_user"),
+                    "email_password": data.get("email_password"),
+                    "email_display_name": data.get("email_display_name", DEFAULT_EMAIL_DISPLAY_NAME),
+                    "is_active": True
+                }
+                
+                if not settings_data["email_user"] or not settings_data["email_password"]:
+                    return json.dumps({"error": "Email user and password are required"}), 400, headers
+                
+                if existing_settings:
+                    # Update existing settings
+                    response = supabase.table("email_settings").update(settings_data).eq("user_id", user.id).execute()
+                else:
+                    # Create new settings
+                    response = supabase.table("email_settings").insert(settings_data).execute()
+                
+                if response.data:
+                    # Don't return the password
+                    safe_settings = {k: v for k, v in response.data[0].items() if k != 'email_password'}
+                    return json.dumps(safe_settings), 200, headers
+                else:
+                    return json.dumps({"error": "Failed to save email settings"}), 500, headers
+            except Exception as e:
+                logger.error(f"Error saving email settings: {e}")
+                return json.dumps({"error": "Failed to save email settings"}), 500, headers
+        elif path == "/api/email-settings/test" and method == "POST":
+            user = get_current_user(request)
+            if not user:
+                return json.dumps({"error": "Invalid authentication"}), 401, headers
+            data = request.get_json()
+            if not data:
+                return json.dumps({"error": "No data provided"}), 400, headers
+            try:
+                # Test the provided email settings
+                email_host = data.get("email_host", DEFAULT_EMAIL_HOST)
+                email_port = int(data.get("email_port", DEFAULT_EMAIL_PORT))
+                email_user = data.get("email_user")
+                email_password = data.get("email_password")
+                
+                if not email_user or not email_password:
+                    return json.dumps({"error": "Email user and password are required"}), 400, headers
+                
+                context = ssl.create_default_context()
+                with smtplib.SMTP(email_host, email_port) as server:
+                    server.starttls(context=context)
+                    server.login(email_user, email_password)
+                    # Try to send a test email to the user's own email
+                    test_msg = MIMEMultipart("alternative")
+                    test_msg["Subject"] = "Email Settings Test"
+                    test_msg["From"] = f"{data.get('email_display_name', DEFAULT_EMAIL_DISPLAY_NAME)} <{email_user}>"
+                    test_msg["To"] = email_user
+                    test_msg.attach(MIMEText("This is a test email to verify your email settings are working correctly.", "plain"))
+                    server.sendmail(email_user, email_user, test_msg.as_string())
+                
+                return json.dumps({"message": "Email settings test successful"}), 200, headers
+            except Exception as e:
+                logger.error(f"Email settings test failed: {e}")
+                return json.dumps({"error": f"Email settings test failed: {str(e)}"}), 400, headers
+        elif path == "/api/send-emails" and method == "POST":
+            user = get_current_user(request)
+            if not user:
+                return json.dumps({"error": "Invalid authentication"}), 401, headers
+            data = request.get_json()
+            if not data:
+                return json.dumps({"error": "No data provided"}), 400, headers
             
-            if response.data:
-                campaign = response.data[0]
-                return CampaignStatus(
-                    campaign_id=campaign["id"],
-                    status=campaign.get("status", "unknown"),
-                    sent=campaign.get("sent_count", 0),
-                    failed=campaign.get("failed_count", 0),
-                    total=campaign.get("total_emails", 0),
-                    progress=campaign.get("progress", 0)
-                )
-        except Exception as db_error:
-            logger.warning(f"Could not fetch campaign from database: {db_error}")
-        
-        # If database fails or campaign not found, return a simple status
-        return CampaignStatus(
-            campaign_id=campaign_id,
-            status="processing",
-            sent=0,
-            failed=0,
-            total=0,
-            progress=50  # Assume 50% progress if we can't determine
-        )
-
-    except Exception as e:
-        logger.error(f"Error getting campaign status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Template management endpoints
-@app.get("/api/templates")
-async def get_templates(current_user = Depends(get_current_user)):
-    try:
-        response = supabase.table("email_templates").select("*").eq("user_id", current_user.id).order("created_at", desc=True).execute()
-        return {"templates": response.data}
-    except Exception as e:
-        logger.error(f"Error fetching templates: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/templates")
-async def create_template(template: SavedTemplate, current_user = Depends(get_current_user)):
-    try:
-        # Convert FileAttachment objects to dictionaries for JSON serialization
-        attachments_data = []
-        if template.attachments:
-            for attachment in template.attachments:
-                attachments_data.append({
-                    "filename": attachment.filename,
-                    "content": attachment.content,
-                    "content_type": attachment.content_type
-                })
-        
-        template_data = {
-            "user_id": current_user.id,
-            "name": template.name,
-            "subject": template.subject,
-            "body": template.body,
-            "attachments": attachments_data,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
-        }
-        
-        response = supabase.table("email_templates").insert(template_data).execute()
-        return {"template": response.data[0]}
-    except Exception as e:
-        logger.error(f"Error creating template: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.put("/api/templates/{template_id}")
-async def update_template(template_id: str, template: SavedTemplate, current_user = Depends(get_current_user)):
-    try:
-        # Convert FileAttachment objects to dictionaries for JSON serialization
-        attachments_data = []
-        if template.attachments:
-            for attachment in template.attachments:
-                attachments_data.append({
-                    "filename": attachment.filename,
-                    "content": attachment.content,
-                    "content_type": attachment.content_type
-                })
-        
-        template_data = {
-            "name": template.name,
-            "subject": template.subject,
-            "body": template.body,
-            "attachments": attachments_data,
-            "updated_at": datetime.utcnow().isoformat()
-        }
-        
-        response = supabase.table("email_templates").update(template_data).eq("id", template_id).eq("user_id", current_user.id).execute()
-        
-        if not response.data:
-            raise HTTPException(status_code=404, detail="Template not found")
+            # Check if user has email settings configured
+            user_settings = get_user_email_settings(user.id)
+            if not user_settings:
+                return json.dumps({"error": "Please configure your email settings first"}), 400, headers
             
-        return {"template": response.data[0]}
-    except HTTPException:
-        raise
+            campaign_id = f"temp_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{user.id}"
+            campaign_tracker.create_temp_campaign(campaign_id, len(data.get("contacts", [])))
+            import threading
+            thread = threading.Thread(
+                target=send_bulk_emails_task,
+                args=(campaign_id, data.get("contacts", []), data.get("template", {}), user.id, data.get("attachments", []))
+            )
+            thread.start()
+            return json.dumps({
+                "message": "Email campaign started",
+                "campaign_id": campaign_id,
+                "total_contacts": len(data.get("contacts", []))
+            }), 200, headers
+        elif path.startswith("/api/campaigns/") and path.endswith("/status") and method == "GET":
+            user = get_current_user(request)
+            if not user:
+                return json.dumps({"error": "Invalid authentication"}), 401, headers
+            campaign_id = path.split("/")[-2]
+            status = campaign_tracker.get_temp_campaign_status(campaign_id)
+            if not status:
+                return json.dumps({"error": "Campaign not found"}), 404, headers
+            return json.dumps(status), 200, headers
+        elif path == "/api/templates" and method == "GET":
+            user = get_current_user(request)
+            if not user:
+                return json.dumps({"error": "Invalid authentication"}), 401, headers
+            try:
+                response = supabase.table("email_templates").select("*").eq("user_id", user.id).execute()
+                templates = response.data if response.data else []
+                return json.dumps({"templates": templates}), 200, headers
+            except Exception as e:
+                logger.error(f"Error fetching templates: {e}")
+                return json.dumps({"error": "Failed to fetch templates"}), 500, headers
+        elif path == "/api/templates" and method == "POST":
+            user = get_current_user(request)
+            if not user:
+                return json.dumps({"error": "Invalid authentication"}), 401, headers
+            data = request.get_json()
+            if not data:
+                return json.dumps({"error": "No data provided"}), 400, headers
+            try:
+                template_data = {
+                    "user_id": user.id,
+                    "name": data.get("name"),
+                    "subject": data.get("subject"),
+                    "body": data.get("body"),
+                    "attachments": data.get("attachments", [])
+                }
+                response = supabase.table("email_templates").insert(template_data).execute()
+                if response.data:
+                    return json.dumps(response.data[0]), 201, headers
+                else:
+                    return json.dumps({"error": "Failed to create template"}), 500, headers
+            except Exception as e:
+                logger.error(f"Error creating template: {e}")
+                return json.dumps({"error": "Failed to create template"}), 500, headers
+        elif path == "/api/dashboard/stats" and method == "GET":
+            user = get_current_user(request)
+            if not user:
+                return json.dumps({"error": "Invalid authentication"}), 401, headers
+            try:
+                templates_response = supabase.table("email_templates").select("id").eq("user_id", user.id).execute()
+                templates_count = len(templates_response.data) if templates_response.data else 0
+                
+                # Check if user has email settings
+                user_settings = get_user_email_settings(user.id)
+                has_email_settings = user_settings is not None
+                
+                total_campaigns = 0
+                total_emails_sent = 0
+                total_emails_failed = 0
+                stats = {
+                    "total_campaigns": total_campaigns,
+                    "total_emails_sent": total_emails_sent,
+                    "total_emails_failed": total_emails_failed,
+                    "recent_campaigns": [],
+                    "templates_count": templates_count,
+                    "has_email_settings": has_email_settings
+                }
+                return json.dumps(stats), 200, headers
+            except Exception as e:
+                logger.error(f"Error fetching dashboard stats: {e}")
+                return json.dumps({"error": "Failed to fetch dashboard stats"}), 500, headers
+        else:
+            return json.dumps({"error": "Endpoint not found"}), 404, headers
     except Exception as e:
-        logger.error(f"Error updating template: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.delete("/api/templates/{template_id}")
-async def delete_template(template_id: str, current_user = Depends(get_current_user)):
-    try:
-        response = supabase.table("email_templates").delete().eq("id", template_id).eq("user_id", current_user.id).execute()
-        
-        if not response.data:
-            raise HTTPException(status_code=404, detail="Template not found")
-            
-        return {"message": "Template deleted successfully"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting template: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Dashboard endpoints
-@app.get("/api/dashboard/stats")
-async def get_dashboard_stats(current_user = Depends(get_current_user)):
-    try:
-        # Get campaign statistics
-        campaigns_response = supabase.table("email_campaigns").select("*").eq("user_id", current_user.id).execute()
-        campaigns = campaigns_response.data or []
-        
-        # Get template count
-        templates_response = supabase.table("email_templates").select("id").eq("user_id", current_user.id).execute()
-        templates_count = len(templates_response.data or [])
-        
-        # Calculate statistics
-        total_campaigns = len(campaigns)
-        total_emails_sent = sum(campaign.get("sent_count", 0) for campaign in campaigns)
-        total_emails_failed = sum(campaign.get("failed_count", 0) for campaign in campaigns)
-        
-        # Get recent campaigns (last 5)
-        recent_campaigns = sorted(campaigns, key=lambda x: x.get("created_at", ""), reverse=True)[:5]
-        
-        return DashboardStats(
-            total_campaigns=total_campaigns,
-            total_emails_sent=total_emails_sent,
-            total_emails_failed=total_emails_failed,
-            recent_campaigns=recent_campaigns,
-            templates_count=templates_count
-        )
-    except Exception as e:
-        logger.error(f"Error fetching dashboard stats: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/campaigns")
-async def get_campaigns(current_user = Depends(get_current_user)):
-    try:
-        response = supabase.table("email_campaigns").select("*").eq("user_id", current_user.id).order("created_at", desc=True).execute()
-        return {"campaigns": response.data or []}
-    except Exception as e:
-        logger.error(f"Error fetching campaigns: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Unexpected error: {e}")
+        return json.dumps({"error": "Internal server error"}), 500, headers
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) 
+    import functions_framework
+    import os
+    
+    # Get port from environment variable (Google Cloud Functions sets PORT=8080)
+    port = int(os.getenv("PORT", 8080))
+    
+    # Start the functions framework server
+    functions_framework.start(target="email_api", port=port, host="0.0.0.0") 

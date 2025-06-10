@@ -31,7 +31,19 @@ Thumbs.db
 test_*.py
 *_test.py
 
-# Keep only necessary files
-!main_gcf.py
-!requirements_gcf.txt
-!campaign_tracker.py 
+# Exclude FastAPI main.py and other development files
+main_fastapi.py
+main_backup.py
+deploy*.ps1
+deploy*.sh
+*.md
+create_*.py
+run_*.py
+fix_*.sql
+test-*.py
+test_*.py
+requirements_fastapi.txt
+
+# Keep only necessary files for Google Cloud Functions
+# main.py (GCF version) and requirements.txt (GCF version) are included by default
+# campaign_tracker.py is included by default 
